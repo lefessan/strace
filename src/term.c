@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 1993, 1994, 1995, 1996 Rick Sladkey <jrs@world.std.com>
- * Copyright (c) 1996-2021 The strace developers.
+ * Copyright (c) 1996-2022 The strace developers.
  * All rights reserved.
  *
  * SPDX-License-Identifier: LGPL-2.1-or-later
@@ -18,85 +18,242 @@
 #include "xlat/baud_options.h"
 #include "xlat/modem_flags.h"
 
+#include "xlat/term_cflags.h"
+#include "xlat/term_cflags_csize.h"
+#include "xlat/term_iflags.h"
+#include "xlat/term_lflags.h"
+#include "xlat/term_oflags.h"
+#include "xlat/term_oflags_bsdly.h"
+#include "xlat/term_oflags_crdly.h"
+#include "xlat/term_oflags_ffdly.h"
+#include "xlat/term_oflags_nldly.h"
+#include "xlat/term_oflags_tabdly.h"
+#include "xlat/term_oflags_vtdly.h"
+
+#include "xlat/term_line_discs.h"
+
+#include "xlat/termios_cc.h"
+
+#ifdef _VMIN /* thanks, alpha and powerpc */
+# include "xlat/termio_cc.h"
+#else
+# define termio_cc termios_cc
+#endif
+
+static void
+decode_oflag(uint64_t val)
+{
+	static const struct {
+		const struct xlat *xl;
+		uint64_t mask;
+		const char *dfl;
+	} xlats[] = {
+		{ term_oflags_nldly,  NLDLY,  "NL?"  },
+		{ term_oflags_crdly,  CRDLY,  "CR?"  },
+		{ term_oflags_tabdly, TABDLY, "TAB?" },
+		{ term_oflags_bsdly,  BSDLY,  "BS?"  },
+		{ term_oflags_vtdly,  VTDLY,  "VT?"  },
+		{ term_oflags_ffdly,  FFDLY,  "FF?"  },
+	};
+
+	tprint_flags_begin();
+	for (unsigned int i = 0; i < ARRAY_SIZE(xlats); i++) {
+		printxval64(xlats[i].xl, val & xlats[i].mask, xlats[i].dfl);
+		tprint_flags_or();
+
+		val &= ~xlats[i].mask;
+	}
+
+	printflags64(term_oflags, val, NULL);
+	tprint_flags_end();
+}
+
+static void
+decode_cflag(uint64_t val)
+{
+	tprint_flags_begin();
+	printxval64(baud_options, val & CBAUD, "B???");
+	tprint_flags_or();
+
+	if (val & CIBAUD) {
+		printxval64(baud_options, (val & CIBAUD) >> IBSHIFT, "B???");
+		tprint_shift();
+		print_xlat(IBSHIFT);
+		tprint_flags_or();
+	}
+
+	printxval64(term_cflags_csize, val & CSIZE, "CS?");
+	tprint_flags_or();
+
+	val &= ~(CBAUD | CIBAUD | CSIZE);
+	printflags64(term_cflags, val, NULL);
+	tprint_flags_end();
+}
+
+static void
+decode_flags(uint64_t iflag, uint64_t oflag, uint64_t cflag, uint64_t lflag)
+{
+	tprints_field_name("c_iflag");
+	printflags64(term_iflags, iflag, NULL);
+
+	tprint_struct_next();
+	tprints_field_name("c_oflag");
+	decode_oflag(oflag);
+
+	tprint_struct_next();
+	tprints_field_name("c_cflag");
+	decode_cflag(cflag);
+
+	tprint_struct_next();
+	tprints_field_name("c_lflag");
+	printflags64(term_lflags, lflag, NULL);
+}
+
+static void
+print_cc_char(bool *first, const unsigned char *data, const char *s,
+	      unsigned int idx)
+{
+	if (*first)
+		*first = false;
+	else
+		tprint_array_next();
+
+	tprint_array_index_begin();
+	if (s)
+		tprints_string(s);
+	else
+		PRINT_VAL_U(idx);
+	tprint_array_index_equal();
+
+	PRINT_VAL_X(data[idx]);
+	tprint_array_index_end();
+}
+
+static void
+decode_term_cc(const struct xlat *xl, const unsigned char *data, unsigned size)
+{
+	tprints_field_name("c_cc");
+	tprint_array_begin();
+	bool first = true;
+	for (unsigned int i = 0; i < size; i++)
+		print_cc_char(&first, data, xlookup(xl, i), i);
+	tprint_array_end();
+}
+
+#ifdef HAVE_STRUCT_TERMIOS2
+static void
+decode_termios2(struct tcb *const tcp, const kernel_ulong_t addr)
+{
+	struct termios2 tios;
+	if (umove_or_printaddr(tcp, addr, &tios))
+		return;
+
+	tprint_struct_begin();
+	decode_flags(tios.c_iflag, tios.c_oflag, tios.c_cflag, tios.c_lflag);
+	tprint_struct_next();
+
+	if (abbrev(tcp)) {
+		tprint_more_data_follows();
+	} else {
+		PRINT_FIELD_XVAL(tios, c_line, term_line_discs, "N_???");
+
+		tprint_struct_next();
+		/* SPARC has two additional bytes in c_cc. */
+		decode_term_cc(termios_cc, tios.c_cc, sizeof(tios.c_cc));
+
+		tprint_struct_next();
+		PRINT_FIELD_U(tios, c_ispeed);
+
+		tprint_struct_next();
+		PRINT_FIELD_U(tios, c_ospeed);
+	}
+	tprint_struct_end();
+}
+#endif /* HAVE_STRUCT_TERMIOS2 */
+
 static void
 decode_termios(struct tcb *const tcp, const kernel_ulong_t addr)
 {
 	struct termios tios;
-
-	tprints(", ");
 	if (umove_or_printaddr(tcp, addr, &tios))
 		return;
+
+	tprint_struct_begin();
+	decode_flags(tios.c_iflag, tios.c_oflag, tios.c_cflag, tios.c_lflag);
+	tprint_struct_next();
+
 	if (abbrev(tcp)) {
-		tprints("{");
-		printxval(baud_options, tios.c_cflag & CBAUD, "B???");
-		tprintf(" %sopost %sisig %sicanon %secho ...}",
-			(tios.c_oflag & OPOST) ? "" : "-",
-			(tios.c_lflag & ISIG) ? "" : "-",
-			(tios.c_lflag & ICANON) ? "" : "-",
-			(tios.c_lflag & ECHO) ? "" : "-");
-		return;
+		tprint_more_data_follows();
+	} else {
+		PRINT_FIELD_XVAL(tios, c_line, term_line_discs, "N_???");
+
+		tprint_struct_next();
+		/*
+		 * Fun fact: MIPS has NCCS defined to 23, SPARC to 17 and
+		 * everything else to 19.
+		 */
+		decode_term_cc(termios_cc, tios.c_cc,
+			       MIN(NCCS, sizeof(tios.c_cc)));
+
+		/*
+		 * alpha and powerpc have those in struct termios instead of
+		 * having a separate struct termios2.
+		 */
+#ifdef HAVE_STRUCT_TERMIOS_C_ISPEED
+		tprint_struct_next();
+		PRINT_FIELD_U(tios, c_ispeed);
+#endif
+#ifdef HAVE_STRUCT_TERMIOS_C_OSPEED
+		tprint_struct_next();
+		PRINT_FIELD_U(tios, c_ospeed);
+#endif
 	}
-	tprintf("{c_iflags=%#lx, c_oflags=%#lx, ",
-		(long) tios.c_iflag, (long) tios.c_oflag);
-	tprintf("c_cflags=%#lx, c_lflags=%#lx, ",
-		(long) tios.c_cflag, (long) tios.c_lflag);
-	tprintf("c_line=%u, ", tios.c_line);
-	if (!(tios.c_lflag & ICANON))
-		tprintf("c_cc[VMIN]=%d, c_cc[VTIME]=%d, ",
-			tios.c_cc[VMIN], tios.c_cc[VTIME]);
-	tprints("c_cc=");
-	print_quoted_string((char *) tios.c_cc, NCCS, QUOTE_FORCE_HEX);
-	tprints("}");
+	tprint_struct_end();
 }
 
 static void
 decode_termio(struct tcb *const tcp, const kernel_ulong_t addr)
 {
 	struct termio tio;
-
-	tprints(", ");
 	if (umove_or_printaddr(tcp, addr, &tio))
 		return;
+
+	tprint_struct_begin();
+	decode_flags(tio.c_iflag, tio.c_oflag, tio.c_cflag, tio.c_lflag);
+	tprint_struct_next();
+
 	if (abbrev(tcp)) {
-		tprints("{");
-		printxval(baud_options, tio.c_cflag & CBAUD, "B???");
-		tprintf(" %sopost %sisig %sicanon %secho ...}",
-			(tio.c_oflag & OPOST) ? "" : "-",
-			(tio.c_lflag & ISIG) ? "" : "-",
-			(tio.c_lflag & ICANON) ? "" : "-",
-			(tio.c_lflag & ECHO) ? "" : "-");
-		return;
+		tprint_more_data_follows();
+	} else {
+		PRINT_FIELD_XVAL(tio, c_line, term_line_discs, "N_???");
+
+		tprint_struct_next();
+		decode_term_cc(termio_cc, tio.c_cc,
+			       MIN(NCC, sizeof(tio.c_cc)));
 	}
-	tprintf("{c_iflags=%#lx, c_oflags=%#lx, ",
-		(long) tio.c_iflag, (long) tio.c_oflag);
-	tprintf("c_cflags=%#lx, c_lflags=%#lx, ",
-		(long) tio.c_cflag, (long) tio.c_lflag);
-	tprintf("c_line=%u, ", tio.c_line);
-#ifdef _VMIN
-	if (!(tio.c_lflag & ICANON))
-		tprintf("c_cc[_VMIN]=%d, c_cc[_VTIME]=%d, ",
-			tio.c_cc[_VMIN], tio.c_cc[_VTIME]);
-#else /* !_VMIN */
-	if (!(tio.c_lflag & ICANON))
-		tprintf("c_cc[VMIN]=%d, c_cc[VTIME]=%d, ",
-			tio.c_cc[VMIN], tio.c_cc[VTIME]);
-#endif /* !_VMIN */
-	tprints("c_cc=\"");
-	for (int i = 0; i < NCC; ++i)
-		tprintf("\\x%02x", tio.c_cc[i]);
-	tprints("\"}");
+	tprint_struct_end();
 }
 
 static void
 decode_winsize(struct tcb *const tcp, const kernel_ulong_t addr)
 {
 	struct winsize ws;
-
-	tprints(", ");
 	if (umove_or_printaddr(tcp, addr, &ws))
 		return;
-	tprintf("{ws_row=%d, ws_col=%d, ws_xpixel=%d, ws_ypixel=%d}",
-		ws.ws_row, ws.ws_col, ws.ws_xpixel, ws.ws_ypixel);
+
+	tprint_struct_begin();
+	PRINT_FIELD_U(ws, ws_row);
+
+	tprint_struct_next();
+	PRINT_FIELD_U(ws, ws_col);
+
+	tprint_struct_next();
+	PRINT_FIELD_U(ws, ws_xpixel);
+
+	tprint_struct_next();
+	PRINT_FIELD_U(ws, ws_ypixel);
+
+	tprint_struct_end();
 }
 
 #ifdef TIOCGSIZE
@@ -104,26 +261,27 @@ static void
 decode_ttysize(struct tcb *const tcp, const kernel_ulong_t addr)
 {
 	struct ttysize ts;
-
-	tprints(", ");
 	if (umove_or_printaddr(tcp, addr, &ts))
 		return;
-	tprintf("{ts_lines=%d, ts_cols=%d}",
-		ts.ts_lines, ts.ts_cols);
+
+	tprint_struct_begin();
+	PRINT_FIELD_U(ts, ts_lines);
+	tprint_struct_next();
+	PRINT_FIELD_U(ts, ts_cols);
+	tprint_struct_end();
 }
 #endif
 
 static void
 decode_modem_flags(struct tcb *const tcp, const kernel_ulong_t addr)
 {
-	int i;
-
-	tprints(", ");
-	if (umove_or_printaddr(tcp, addr, &i))
+	unsigned int flags;
+	if (umove_or_printaddr(tcp, addr, &flags))
 		return;
-	tprints("[");
-	printflags(modem_flags, i, "TIOCM_???");
-	tprints("]");
+
+	tprint_indirect_begin();
+	printflags(modem_flags, flags, "TIOCM_???");
+	tprint_indirect_end();
 }
 
 int
@@ -131,28 +289,39 @@ term_ioctl(struct tcb *const tcp, const unsigned int code,
 	   const kernel_ulong_t arg)
 {
 	switch (code) {
+#ifdef HAVE_STRUCT_TERMIOS2
+	/* struct termios2 */
+# ifdef TCGETS2
+	case TCGETS2:
+# endif
+		if (entering(tcp))
+			return 0;
+		ATTRIBUTE_FALLTHROUGH;
+# ifdef TCSETS2
+	case TCSETS2:
+# endif
+# ifdef TCSETSW2
+	case TCSETSW2:
+# endif
+# ifdef TCSETSF2
+	case TCSETSF2:
+# endif
+		tprint_arg_next();
+		decode_termios2(tcp, arg);
+		break;
+#endif /* HAVE_STRUCT_TERMIOS2 */
+
 	/* struct termios */
 	case TCGETS:
-#ifdef TCGETS2
-	case TCGETS2:
-#endif
 	case TIOCGLCKTRMIOS:
 		if (entering(tcp))
 			return 0;
 		ATTRIBUTE_FALLTHROUGH;
 	case TCSETS:
-#ifdef TCSETS2
-	case TCSETS2:
-#endif
 	case TCSETSW:
-#ifdef TCSETSW2
-	case TCSETSW2:
-#endif
 	case TCSETSF:
-#ifdef TCSETSF2
-	case TCSETSF2:
-#endif
 	case TIOCSLCKTRMIOS:
+		tprint_arg_next();
 		decode_termios(tcp, arg);
 		break;
 
@@ -164,6 +333,7 @@ term_ioctl(struct tcb *const tcp, const unsigned int code,
 	case TCSETA:
 	case TCSETAW:
 	case TCSETAF:
+		tprint_arg_next();
 		decode_termio(tcp, arg);
 		break;
 
@@ -173,6 +343,7 @@ term_ioctl(struct tcb *const tcp, const unsigned int code,
 			return 0;
 		ATTRIBUTE_FALLTHROUGH;
 	case TIOCSWINSZ:
+		tprint_arg_next();
 		decode_winsize(tcp, arg);
 		break;
 
@@ -183,23 +354,25 @@ term_ioctl(struct tcb *const tcp, const unsigned int code,
 			return 0;
 		ATTRIBUTE_FALLTHROUGH;
 	case TIOCSSIZE:
+		tprint_arg_next();
 		decode_ttysize(tcp, arg);
 		break;
 #endif
 
 	/* ioctls with a direct decodable arg */
 	case TCXONC:
-		tprints(", ");
+		tprint_arg_next();
 		printxval64(tcxonc_options, arg, "TC???");
 		break;
 	case TCFLSH:
-		tprints(", ");
+		tprint_arg_next();
 		printxval64(tcflsh_options, arg, "TC???");
 		break;
 	case TCSBRK:
 	case TCSBRKP:
 	case TIOCSCTTY:
-		tprintf(", %d", (int) arg);
+		tprint_arg_next();
+		PRINT_VAL_D((int) arg);
 		break;
 
 	/* ioctls with an indirect parameter displayed as modem flags */
@@ -210,6 +383,7 @@ term_ioctl(struct tcb *const tcp, const unsigned int code,
 	case TIOCMBIS:
 	case TIOCMBIC:
 	case TIOCMSET:
+		tprint_arg_next();
 		decode_modem_flags(tcp, arg);
 		break;
 
@@ -237,13 +411,13 @@ term_ioctl(struct tcb *const tcp, const unsigned int code,
 	case TIOCPKT:
 	case TIOCSSOFTCAR:
 	case TIOCSPTLCK:
-		tprints(", ");
+		tprint_arg_next();
 		printnum_int(tcp, arg, "%d");
 		break;
 
 	/* ioctls with an indirect parameter displayed as a char */
 	case TIOCSTI:
-		tprints(", ");
+		tprint_arg_next();
 		printstrn(tcp, arg, 1);
 		break;
 

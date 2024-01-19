@@ -95,14 +95,16 @@ tprint_sock_type(unsigned int flags)
 {
 	const char *str = xlookup(socktypes, flags & SOCK_TYPE_MASK);
 
+	tprint_flags_begin();
 	if (str) {
 		print_xlat_ex(flags & SOCK_TYPE_MASK, str, XLAT_STYLE_DEFAULT);
 		flags &= ~SOCK_TYPE_MASK;
 		if (!flags)
 			return;
-		tprints("|");
+		tprint_flags_or();
 	}
-	printflags(sock_type_flags, flags, "SOCK_???");
+	printflags_in(sock_type_flags, flags, "SOCK_???");
+	tprint_flags_end();
 }
 
 SYS_FUNC(socket)
@@ -758,7 +760,7 @@ print_tpacket_stats(struct tcb *const tcp, const kernel_ulong_t addr,
 	tprint_struct_end();
 }
 
-#include "xlat/icmpfilterflags.h"
+#include "xlat/icmp_filter_flags.h"
 
 static void
 print_icmp_filter(struct tcb *const tcp, const kernel_ulong_t addr, int len)
@@ -775,9 +777,40 @@ print_icmp_filter(struct tcb *const tcp, const kernel_ulong_t addr, int len)
 	if (umoven_or_printaddr(tcp, addr, len, &filter))
 		return;
 
-	tprints("~(");
-	printflags(icmpfilterflags, ~filter.data, "ICMP_???");
-	tprints(")");
+	uint32_t data32 = filter.data;
+	static_assert(sizeof(filter.data) == sizeof(data32),
+		      "struct icmp_filter.data is not 32-bit long");
+
+	/* check whether more than half of the bits are set */
+	if (popcount32(&data32, 1) > sizeof(data32) * 8 / 2) {
+		/* show those bits that are NOT in the set */
+		data32 = ~data32;
+		tprints_dummy("~"); // structured_output: TODO
+	}
+
+	/* next_set_bit operates on current_wordsize words */
+	unsigned long data;
+	void *p;
+	if (current_wordsize > sizeof(data32)) {
+		data = data32;
+		p = &data;
+	} else {
+		p = &data32;
+	}
+
+	tprint_bitset_begin();
+	bool next = false;
+	for (int i = 0;; ++i) {
+		i = next_set_bit(p, i, sizeof(data32) * 8);
+		if (i < 0)
+			break;
+		if (next)
+			tprint_bitset_next();
+		else
+			next = true;
+		printxval(icmp_filter_flags, i, "ICMP_???");
+	}
+	tprint_bitset_end();
 }
 
 static void

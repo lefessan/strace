@@ -98,13 +98,21 @@ done
 wait
 
 %check
-%{buildroot}%{_bindir}/strace -V
-%make_build -k check VERBOSE=1
-echo 'BEGIN OF TEST SUITE INFORMATION'
-tail -n 99999 -- tests*/test-suite.log tests*/ksysent.gen.log
-find tests* -type f -name '*.log' -print0 |
-	xargs -r0 grep -H '^KERNEL BUG:' -- ||:
-echo 'END OF TEST SUITE INFORMATION'
+width=$(echo __LONG_WIDTH__ |%__cc -E -P -)
+skip_32bit=0
+%if 0%{?fedora} >= 35 || 0%{?rhel} > 9
+skip_32bit=1
+%endif
+
+if [ "${width}" != 32 ] || [ "${skip_32bit}" != 1 ]; then
+	%{buildroot}%{_bindir}/strace -V
+	%make_build -k check VERBOSE=1
+	echo 'BEGIN OF TEST SUITE INFORMATION'
+	tail -n 99999 -- tests*/test-suite.log tests*/ksysent.gen.log
+	find tests* -type f -name '*.log' -print0 |
+		xargs -r0 grep -H '^KERNEL BUG:' -- ||:
+	echo 'END OF TEST SUITE INFORMATION'
+fi
 
 %files
 %maybe_use_defattr
@@ -116,6 +124,9 @@ echo 'END OF TEST SUITE INFORMATION'
 %changelog
 * @RPM_CHANGELOGTIME@ @PACKAGE_BUGREPORT@ - @PACKAGE_VERSION@-1
 - @PACKAGE_STRING@ snapshot.
+
+* Sat Oct 29 2022 Dmitry V. Levin <ldv@strace.io> - 6.0-1
+- v5.19 -> v6.0.
 
 * Fri Aug 12 2022 Dmitry V. Levin <ldv@strace.io> - 5.19-1
 - v5.18 -> v5.19.
